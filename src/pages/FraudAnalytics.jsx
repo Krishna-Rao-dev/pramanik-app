@@ -1,14 +1,12 @@
 import { useState, useRef } from "react";
-import { MOCK } from "../services/api";
+import { api } from "../services/api";
 import { PageHeader, Card, CardHeader, Badge, Table, Btn } from "../components/layout/UI";
 import EntityGraph from "../components/fraud/EntityGraph";
-
-const fraud = MOCK.fraudAnalysis;
 
 const FRAUD_DOCS = [
   { key:"board",    label:"Board of Directors List",       required:true  },
   { key:"kmp",      label:"List of KMPs",                  required:true  },
-  { key:"promoter", label:"KYC of Promoters & Directors",  required:true  },
+  { key:"promoter", label:"KYC of Promoters & Directors",  required:false },
   { key:"guarantor",label:"KYC of Guarantors",             required:false },
   { key:"fatca",    label:"FATCA Compliance",              required:false },
   { key:"benef",    label:"List of Beneficial Owners",     required:true  },
@@ -43,7 +41,6 @@ function PersonCard({ p }) {
   const risk = p.riskScore<30?"var(--success)":p.riskScore<60?"var(--warning)":"var(--danger)";
   return (
     <Card style={{ display:"flex", gap:14 }}>
-      {/* SVG person icon */}
       <div style={{ width:48, height:48, borderRadius:"50%", background:"var(--bg-base)", border:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
@@ -65,16 +62,16 @@ function PersonCard({ p }) {
           {[["DIN",p.din],["PAN",p.pan],["DOB",p.dob],["Address",p.address]].map(([k,v])=>(
             <div key={k} style={{ padding:"5px 8px", background:"var(--bg-base)", borderRadius:5, border:"1px solid var(--border)" }}>
               <div style={{ fontSize:9, color:"var(--text-muted)", marginBottom:1, textTransform:"uppercase" }}>{k}</div>
-              <div style={{ fontSize:11, color:"var(--text-primary)", fontFamily:"var(--font-mono)" }}>{v}</div>
+              <div style={{ fontSize:11, color:"var(--text-primary)", fontFamily:"var(--font-mono)" }}>{v||"—"}</div>
             </div>
           ))}
         </div>
         <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
           <Badge color={p.pep?"red":"green"}>{p.pep?"PEP Flagged":"Not PEP"}</Badge>
           <Badge color={p.sanctions?"red":"green"}>{p.sanctions?"Sanctions Hit":"No Sanctions"}</Badge>
-          {p.otherDirectorships.length>0 && <Badge color="amber">{p.otherDirectorships.length} Other Directorship(s)</Badge>}
+          {(p.otherDirectorships||[]).length>0 && <Badge color="amber">{p.otherDirectorships.length} Other Directorship(s)</Badge>}
         </div>
-        {p.otherDirectorships.length>0 && (
+        {(p.otherDirectorships||[]).length>0 && (
           <div style={{ fontSize:12, color:"var(--text-muted)", marginTop:6 }}>
             Also director in: {p.otherDirectorships.join(", ")}
           </div>
@@ -87,20 +84,106 @@ function PersonCard({ p }) {
 export default function FraudAnalytics({ session }) {
   const [stage,    setStage]    = useState("upload");
   const [procStep, setProcStep] = useState(0);
+  const [procLabel,setProcLabel]= useState("");
   const [tab,      setTab]      = useState("graph");
   const [files,    setFiles]    = useState({});
+  const [fraudData,setFraudData]= useState(null);
+  const [error,    setError]    = useState("");
+  const [exporting,setExporting]= useState(false);
   const refs = useRef({});
 
   const reqCount  = FRAUD_DOCS.filter(d=>d.required).length;
   const uploaded  = FRAUD_DOCS.filter(d=>d.required&&files[d.key]).length;
   const canSubmit = uploaded===reqCount;
 
-  const procSteps = ["Parsing director & KMP documents","Building entity relationship graph","Running beneficial ownership analysis","Checking PEP & sanctions databases","Analysing related party transactions","Running NLP summary via Qwen3","Computing risk score"];
+  const procSteps = [
+    "Parsing director & KMP documents",
+    "Building entity relationship graph",
+    "Running beneficial ownership analysis",
+    "Checking PEP & sanctions databases",
+    "Analysing related party transactions",
+    "Running NLP summary via Qwen2.5",
+    "Computing risk score",
+  ];
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    if (!session?.id) { setError("No active session. Complete compliance verification first."); return; }
+    setError("");
+
+    // Upload files first
+    const formData = new FormData();
+    formData.append("session_id", session.id);
+    for (const slot of FRAUD_DOCS) {
+      if (files[slot.key]) formData.append(slot.key, files[slot.key]);
+    }
+    try {
+      const upRes = await api.uploadFraudDocs(formData);
+      if (!upRes.ok) { const d = await upRes.json(); setError(d.detail || "Upload failed"); return; }
+    } catch (e) {
+      setError("Upload failed: " + e.message);
+      return;
+    }
+
     setStage("processing");
-    let i=0;
-    const iv=setInterval(()=>{i++;setProcStep(i);if(i>=procSteps.length){clearInterval(iv);setTimeout(()=>setStage("results"),500);}},750);
+
+    // SSE stream
+    fetch(`http://localhost:8000/api/v1/fraud/analyze/${session.id}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${localStorage.getItem("pramanik_token")}` },
+    }).then(res => {
+      if (!res.ok) { setError("Analysis failed to start"); setStage("upload"); return; }
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      const read = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) return;
+          const text  = decoder.decode(value);
+          const lines = text.split("\n").filter(l => l.startsWith("data: "));
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              setProcStep(data.index);
+              setProcLabel(data.step);
+              if (data.status === "done") {
+                setFraudData(data.result);
+                setStage("results");
+                return;
+              }
+              if (data.status === "error") {
+                setError(data.step);
+                setStage("upload");
+                return;
+              }
+            } catch {}
+          }
+          read();
+        });
+      };
+      read();
+    }).catch(e => { setError("SSE failed: " + e.message); setStage("upload"); });
+  };
+
+  const handleExport = async () => {
+    if (!session?.id) return;
+    setExporting(true);
+    try {
+      await api.downloadPDF(session.id, "fraud");
+    } catch (e) {
+      setError("Export failed: " + e.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleRestart = () => {
+    // Reset fraud-specific state while preserving compliance session
+    setStage("upload");
+    setFiles({});
+    setFraudData(null);
+    setError("");
+    setTab("graph");
+    setProcStep(0);
+    setProcLabel("");
   };
 
   const tabs = [
@@ -111,10 +194,30 @@ export default function FraudAnalytics({ session }) {
     {id:"risk",    label:"Risk Overview"},
   ];
 
+  const fd = fraudData || {};
+
   return (
     <div style={{ padding:"28px 32px" }}>
-      <PageHeader breadcrumb={["Fraud Analytics","Detection"]} title="Fraud Detection & Risk Analysis"
-        subtitle="Entity graph · Beneficial ownership · PEP screening · RPT analysis · NLP risk summary" />
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:24 }}>
+        <PageHeader breadcrumb={["Fraud Analytics","Detection"]} title="Fraud Detection & Risk Analysis"
+          subtitle="Entity graph · Beneficial ownership · PEP screening · RPT analysis · NLP risk summary" />
+        {stage === "results" && (
+          <div style={{ display:"flex", gap:8 }}>
+            <Btn onClick={handleRestart} variant="secondary" size="sm">
+              ↻ Restart Analysis
+            </Btn>
+            <Btn onClick={handleExport} disabled={exporting} variant="secondary" size="sm">
+              {exporting ? "Generating..." : "⬇ Export PDF"}
+            </Btn>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ padding:"10px 14px", background:"var(--danger-bg)", border:"1px solid var(--danger-border)", borderRadius:6, color:"var(--danger)", fontSize:13, marginBottom:16 }}>
+          {error}
+        </div>
+      )}
 
       {/* Upload */}
       {stage==="upload" && (
@@ -163,30 +266,40 @@ export default function FraudAnalytics({ session }) {
             {procSteps.map((s,i)=>(
               <div key={i} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:13 }}>
                 <div style={{ width:22, height:22, borderRadius:"50%", flexShrink:0,
-                  background:procStep>i?"var(--success)":procStep===i?"var(--accent)":"var(--bg-input)",
-                  border:`2px solid ${procStep>i?"var(--success)":procStep===i?"var(--accent)":"var(--border)"}`,
+                  background:procStep>i+1?"var(--success)":procStep===i+1?"var(--accent)":"var(--bg-input)",
+                  border:`2px solid ${procStep>i+1?"var(--success)":procStep===i+1?"var(--accent)":"var(--border)"}`,
                   display:"flex", alignItems:"center", justifyContent:"center",
                   fontSize:10, color:"#fff", fontWeight:600, transition:"all 0.3s" }}>
-                  {procStep>i?"✓":""}
+                  {procStep>i+1?"✓":""}
                 </div>
-                <span style={{ fontSize:13, color:procStep>i?"var(--text-primary)":procStep===i?"var(--accent)":"var(--text-muted)", transition:"color 0.3s" }}>{s}</span>
+                <span style={{ fontSize:13, color:procStep>i+1?"var(--text-primary)":procStep===i+1?"var(--accent)":"var(--text-muted)", transition:"color 0.3s" }}>{s}</span>
               </div>
             ))}
+            {procLabel && !procSteps.includes(procLabel) && (
+              <div style={{ fontSize:11, color:"var(--text-muted)", fontFamily:"var(--font-mono)", marginTop:6 }}>{procLabel}</div>
+            )}
           </Card>
         </div>
       )}
 
       {/* Results */}
-      {stage==="results" && (
+      {stage==="results" && fd && (
         <div>
           {/* Risk banner */}
           <Card style={{ marginBottom:20, display:"flex", alignItems:"center", gap:24 }}>
-            <RiskMeter score={fraud.riskScore} />
+            <RiskMeter score={fd.riskScore||0} />
             <div style={{ flex:1 }}>
               <div style={{ fontSize:15, fontWeight:700, color:"var(--text-primary)", marginBottom:5 }}>Risk Assessment Complete</div>
-              <div style={{ fontSize:13, color:"var(--text-muted)", lineHeight:1.6, maxWidth:500, marginBottom:10 }}>{fraud.nlpSummary[6]}</div>
+              <div style={{ fontSize:13, color:"var(--text-muted)", lineHeight:1.6, maxWidth:500, marginBottom:10 }}>
+                {(fd.nlpSummary||[]).slice(-1)[0] || "Analysis complete."}
+              </div>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                {[`${fraud.entityGraph.nodes.length} Entities`,`${fraud.entityGraph.edges.length} Relationships`,`${fraud.rpt.length} RPT Flags`,`${fraud.persons.filter(p=>p.pep).length} PEP Flags`].map(t=>(
+                {[
+                  `${(fd.entityGraph?.nodes||[]).length} Entities`,
+                  `${(fd.entityGraph?.edges||[]).length} Relationships`,
+                  `${(fd.rpt||[]).length} RPT Flags`,
+                  `${(fd.persons||[]).filter(p=>p.pep).length} PEP Flags`,
+                ].map(t=>(
                   <span key={t} style={{ fontSize:12, padding:"3px 10px", background:"var(--bg-base)", border:"1px solid var(--border)", borderRadius:4, color:"var(--text-muted)" }}>{t}</span>
                 ))}
               </div>
@@ -205,22 +318,22 @@ export default function FraudAnalytics({ session }) {
             ))}
           </div>
 
-          {/* Entity graph */}
           {tab==="graph" && (
             <Card noPad>
               <CardHeader title="Entity Relationship Graph" subtitle="Ownership chains · Directorship links · Beneficial ownership · Financial relationships" />
-              <EntityGraph nodes={fraud.entityGraph.nodes} edges={fraud.entityGraph.edges} />
+              {(fd.entityGraph?.nodes||[]).length > 0
+                ? <EntityGraph nodes={fd.entityGraph.nodes} edges={fd.entityGraph.edges} />
+                : <div style={{ padding:24, textAlign:"center", color:"var(--text-muted)" }}>No entity graph data available.</div>
+              }
             </Card>
           )}
 
-          {/* NLP */}
           {tab==="nlp" && (
             <Card noPad>
-              <CardHeader title="AI-Generated Risk Summary" subtitle="Generated by Qwen3 via Ollama"
-                right={<Badge color="blue">QWEN3</Badge>} />
+              <CardHeader title="AI-Generated Risk Summary" subtitle="Generated by Qwen2.5:3b via Ollama" right={<Badge color="blue">QWEN2.5</Badge>} />
               <div style={{ padding:18 }}>
-                {fraud.nlpSummary.map((pt,i)=>(
-                  <div key={i} style={{ display:"flex", gap:12, marginBottom:12, padding:"10px 12px", background:i===fraud.nlpSummary.length-1?"var(--success-bg)":"var(--bg-base)", borderRadius:7, border:`1px solid ${i===fraud.nlpSummary.length-1?"var(--success-border)":"var(--border)"}` }}>
+                {(fd.nlpSummary||[]).map((pt,i)=>(
+                  <div key={i} style={{ display:"flex", gap:12, marginBottom:12, padding:"10px 12px", background:i===(fd.nlpSummary.length-1)?"var(--success-bg)":"var(--bg-base)", borderRadius:7, border:`1px solid ${i===(fd.nlpSummary.length-1)?"var(--success-border)":"var(--border)"}` }}>
                     <div style={{ width:20,height:20,borderRadius:"50%",background:"var(--accent)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:600,flexShrink:0,marginTop:2 }}>{i+1}</div>
                     <p style={{ margin:0, fontSize:13, color:"var(--text-secondary)", lineHeight:1.65 }}>{pt}</p>
                   </div>
@@ -229,17 +342,18 @@ export default function FraudAnalytics({ session }) {
             </Card>
           )}
 
-          {/* Persons */}
           {tab==="persons" && (
             <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-              {fraud.persons.map(p=><PersonCard key={p.name} p={p} />)}
+              {(fd.persons||[]).length === 0
+                ? <div style={{ padding:24, textAlign:"center", color:"var(--text-muted)" }}>No persons data extracted.</div>
+                : (fd.persons||[]).map(p=><PersonCard key={p.name||Math.random()} p={p} />)
+              }
             </div>
           )}
 
-          {/* RPT */}
           {tab==="rpt" && (
             <Card noPad>
-              <CardHeader title="Related Party Transactions" right={<Badge color="amber">{fraud.rpt.length} Entities</Badge>} />
+              <CardHeader title="Related Party Transactions" right={<Badge color="amber">{(fd.rpt||[]).length} Entities</Badge>} />
               <Table
                 columns={[
                   { key:"entity",          label:"Entity",       render:v=><span style={{ fontWeight:500, color:"var(--text-primary)" }}>{v}</span> },
@@ -249,24 +363,24 @@ export default function FraudAnalytics({ session }) {
                   { key:"riskLevel",       label:"Risk",         render:v=><Badge color={v==="LOW"?"green":v==="MEDIUM"?"amber":"red"}>{v}</Badge> },
                   { key:"flagReason",      label:"Flag Reason",  render:v=><span style={{ fontSize:11, color:"var(--text-muted)" }}>{v}</span> },
                 ]}
-                rows={fraud.rpt}
+                rows={fd.rpt||[]}
+                emptyMsg="No RPT data extracted."
               />
             </Card>
           )}
 
-          {/* Risk overview */}
           {tab==="risk" && (
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14 }}>
               {[
-                { label:"AML Flags",         value:0,                            color:"var(--success)" },
-                { label:"PEP Matches",        value:fraud.persons.filter(p=>p.pep).length, color:"var(--success)" },
-                { label:"Sanctions Hits",     value:0,                            color:"var(--success)" },
-                { label:"RPT Entities",       value:fraud.rpt.length,             color:"var(--warning)" },
-                { label:"Graph Depth",        value:"3 levels",                   color:"var(--text-primary)" },
-                { label:"Corroboration",      value:"HIGH",                       color:"var(--success)" },
+                { label:"Risk Score",     value:`${fd.riskScore||0}/100`,                           color:"var(--success)" },
+                { label:"Risk Level",     value:fd.riskLevel||"—",                                  color:"var(--success)" },
+                { label:"PEP Flags",      value:(fd.persons||[]).filter(p=>p.pep).length,           color:"var(--text-primary)" },
+                { label:"RPT Entities",   value:(fd.rpt||[]).length,                                color:"var(--warning)" },
+                { label:"Active Flags",   value:(fd.flags||[]).join(", ")||"None",                  color:(fd.flags||[]).length>0?"var(--danger)":"var(--success)" },
+                { label:"Recommendation", value:fd.riskLevel==="LOW"?"STANDARD DUE DILIGENCE":fd.riskLevel==="MEDIUM"?"ENHANCED DUE DILIGENCE":"REJECT", color:fd.riskLevel==="HIGH"?"var(--danger)":fd.riskLevel==="MEDIUM"?"var(--warning)":"var(--success)" },
               ].map(m=>(
                 <Card key={m.label} style={{ textAlign:"center" }}>
-                  <div style={{ fontSize:26, fontWeight:700, color:m.color, fontFamily:"var(--font-mono)", marginBottom:4 }}>{m.value}</div>
+                  <div style={{ fontSize: typeof m.value === "number" ? 26 : 14, fontWeight:700, color:m.color, fontFamily:"var(--font-mono)", marginBottom:4, wordBreak:"break-word" }}>{m.value}</div>
                   <div style={{ fontSize:12, color:"var(--text-muted)" }}>{m.label}</div>
                 </Card>
               ))}
