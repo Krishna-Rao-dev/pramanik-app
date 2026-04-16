@@ -21,19 +21,29 @@ const DOC_LABEL = {
 };
 
 // ── Step 1 ─────────────────────────────────────────────────────
+// ── StepPAN — drop-in replacement for the StepPAN function in BasicVerification.jsx
+// Collects PAN (required) + GSTIN + LEI (optional, for fallback injection)
+// Replace the existing StepPAN function with this one.
+
 function StepPAN({ onNext }) {
-  const [pan, setPan] = useState("");
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [pan,    setPan]    = useState("");
+  const [gstin,  setGstin]  = useState("");
+  const [lei,    setLei]    = useState("");
+  const [err,    setErr]    = useState("");
+  const [loading,setLoading]= useState(false);
 
   const go = async () => {
     const p = pan.trim().toUpperCase();
-    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(p)) { setErr("Invalid PAN format. Expected: AAKCM1234C (10 characters)"); return; }
+    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(p)) { setErr("Invalid PAN format. Expected: AAKCM1234C"); return; }
     if (p[3] !== "C") { setErr(`4th character is '${p[3]}' — must be 'C' for a Company PAN.`); return; }
     setErr("");
     setLoading(true);
     try {
-      const res  = await api.createSession(p);
+      const body = { pan: p };
+      if (gstin.trim()) body.input_gstin = gstin.trim().toUpperCase();
+      if (lei.trim())   body.input_lei   = lei.trim().toUpperCase();
+
+      const res  = await api.createSession(body);
       const data = await res.json();
       if (!res.ok) { setErr(data.detail || "Failed to create session"); setLoading(false); return; }
       onNext(p, data);
@@ -46,21 +56,61 @@ function StepPAN({ onNext }) {
   return (
     <div style={{ maxWidth: 500 }}>
       <Card>
+        {/* PAN input */}
         <div style={{ marginBottom: 18 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>Company PAN Number</div>
-          <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Enter the 10-character Company PAN. The 4th character must be 'C' to identify a company entity.</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
+            Company PAN Number <span style={{ color: "var(--danger)" }}>*</span>
+          </div>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 10 }}>
+            Enter the 10-character Company PAN. The 4th character must be 'C'.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={pan} onChange={e => { setPan(e.target.value.toUpperCase()); setErr(""); }}
+              onKeyDown={e => e.key === "Enter" && go()}
+              placeholder="e.g. AAKCM1234C" maxLength={10}
+              style={{ flex: 1, padding: "10px 12px", letterSpacing: "0.1em", fontFamily: "var(--font-mono)", fontSize: 15 }}
+            />
+            <Btn onClick={go} disabled={loading}>{loading ? "..." : "Next →"}</Btn>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-          <input value={pan} onChange={e => { setPan(e.target.value.toUpperCase()); setErr(""); }}
-            onKeyDown={e => e.key === "Enter" && go()}
-            placeholder="e.g. AAKCM1234C" maxLength={10}
-            style={{ flex: 1, padding: "10px 12px", letterSpacing: "0.1em", fontFamily: "var(--font-mono)", fontSize: 15 }}
-          />
-          <Btn onClick={go} disabled={loading}>{loading ? "..." : "Next →"}</Btn>
-        </div>
-        {err && <div style={{ fontSize: 13, color: "var(--danger)", padding: "8px 10px", background: "var(--danger-bg)", borderRadius: 5, border: "1px solid var(--danger-border)" }}>{err}</div>}
 
-        <div style={{ marginTop: 14, padding: "12px", background: "var(--bg-input)", borderRadius: 6, border: "1px solid var(--border)" }}>
+        {/* Optional fallback inputs */}
+        <div style={{ padding: "14px", background: "var(--bg-base)", borderRadius: 7, border: "1px solid var(--border)", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4 }}>
+            Optional — Fallback Values
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+            If OCR fails to extract these from documents, the values below are used as a fallback.
+            Provide them now to guarantee accuracy.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-muted)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>GSTIN</div>
+              <input value={gstin} onChange={e => setGstin(e.target.value.toUpperCase())}
+                placeholder="e.g. 33AAKCM1234C1ZP (15 chars)"
+                maxLength={15}
+                style={{ width: "100%", padding: "8px 10px", fontFamily: "var(--font-mono)", fontSize: 13 }}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-muted)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>LEI Code</div>
+              <input value={lei} onChange={e => setLei(e.target.value.toUpperCase())}
+                placeholder="e.g. 335800ZKOEYGGGCTEV49 (20 chars)"
+                maxLength={20}
+                style={{ width: "100%", padding: "8px 10px", fontFamily: "var(--font-mono)", fontSize: 13 }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {err && (
+          <div style={{ fontSize: 13, color: "var(--danger)", padding: "8px 10px", background: "var(--danger-bg)", borderRadius: 5, border: "1px solid var(--danger-border)", marginBottom: 12 }}>
+            {err}
+          </div>
+        )}
+
+        {/* PAN format guide */}
+        <div style={{ padding: "12px", background: "var(--bg-input)", borderRadius: 6, border: "1px solid var(--border)" }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, fontWeight: 500 }}>PAN FORMAT GUIDE</div>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, letterSpacing: "0.15em", marginBottom: 4 }}>
             {["A","A","K","C","M","1","2","3","4","C"].map((ch, i) => (
@@ -68,13 +118,14 @@ function StepPAN({ onNext }) {
             ))}
           </div>
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            Positions 1–3: Sequence · <span style={{ color: "var(--accent)", fontWeight: 600 }}>4th: Entity type (C = Company)</span> · 5: Initial · 6–9: Number · 10: Check
+            Positions 1–3: Sequence · <span style={{ color: "var(--accent)", fontWeight: 600 }}>4th: C = Company</span> · 5: Initial · 6–9: Number · 10: Check
           </div>
         </div>
       </Card>
     </div>
   );
 }
+
 
 // ── Step 2 ─────────────────────────────────────────────────────
 function StepUpload({ pan, session, onProcess }) {

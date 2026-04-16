@@ -34,8 +34,8 @@ export const api = {
   seed:   ()      => apiFetch("/auth/seed",    { method: "POST" }),
 
   // ── Sessions ──────────────────────────────────────────────
-  createSession: (pan) =>
-    apiFetch("/session/create", { method: "POST", body: JSON.stringify({ pan }), headers: authHeaders() }),
+createSession: (body) =>
+  apiFetch("/session/create", { method: "POST", body: JSON.stringify(body), headers: authHeaders() }),
   getSession:    (id)  =>
     apiFetch(`/session/${id}`,  { headers: authHeaders() }),
   listSessions:  ()    =>
