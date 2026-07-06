@@ -221,7 +221,7 @@ function StepProcessing({ session, onComplete }) {
 
     const sseUrl = api.ocrSSEUrl(session.id);
     // Use fetch with POST to trigger OCR, then listen
-    fetch(`http://localhost:8000/api/v1/compliance/ocr/${session.id}`, {
+    fetch(`http://13.232.162.208:8000/api/v1/compliance/ocr/${session.id}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${localStorage.getItem("pramanik_token")}` },
     }).then(res => {
