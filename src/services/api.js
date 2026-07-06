@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8000/api/v1";
+const BASE = "http://13.232.162.208/api/v1";
 
 // ── Token management ──────────────────────────────────────────
 export const token = {
