@@ -127,7 +127,7 @@ export default function FraudAnalytics({ session }) {
     setStage("processing");
 
     // SSE stream
-    fetch(`http://localhost:8000/api/v1/fraud/analyze/${session.id}`, {
+    fetch(`http://13.232.162.208:8000/api/v1/fraud/analyze/${session.id}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${localStorage.getItem("pramanik_token")}` },
     }).then(res => {
