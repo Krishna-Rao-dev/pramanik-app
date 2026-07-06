@@ -168,7 +168,7 @@ export default function FraudTestLab() {
 
       // 3. Stream fraud analysis SSE
       const analysisRes = await fetch(
-        `http://localhost:8000/api/v1/fraud/analyze/${sessionId}`,
+        `http://13.232.162.208:8000/api/v1/fraud/analyze/${sessionId}`,
         { method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("pramanik_token")}` } }
       );
       if (!analysisRes.ok) throw new Error("Analysis failed to start");
